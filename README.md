@@ -1,5 +1,4 @@
 # ES-3890-03-NoteBook
-# Digital Notebook for ES 3890-03
 
 ## Dataset:
 https://www.kaggle.com/datasets/romainpessia/artificial-lunar-rocky-landscape-dataset
