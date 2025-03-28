@@ -20,9 +20,7 @@ class LunarTerrainEnv(gym.Env):
     def __init__(self):
         super(LunarTerrainEnv, self).__init__()
         # Observation: x, y in [0, 5], vx, vy in [-1, 1], five lidar readings in [0, 1]
-        low_obs = np.array([0.0, 0.0, -1.0, -1.0] + [0.0]*5, dtype=np.float32)
-        high_obs = np.array([5.0, 5.0, 1.0, 1.0] + [1.0]*5, dtype=np.float32)
-        self.observation_space = spaces.Box(low=low_obs, high=high_obs, dtype=np.float32)
+        
         # Actions: 0 = Turn Left, 1 = Turn Right, 2 = Maintain Heading
         self.action_space = spaces.Discrete(3)
         self.constant_speed = 0.1
@@ -31,6 +29,12 @@ class LunarTerrainEnv(gym.Env):
         self.obstacle_factor = 10.0
         self.large_penalty = 100.0
         self.large_bonus = 100.0
+
+        self.lidar_samples = 360
+
+        low_obs = np.array([0.0, 0.0, -1.0, -1.0] + [0.0]*self.lidar_samples , dtype=np.float32)
+        high_obs = np.array([5.0, 5.0, 1.0, 1.0] + [7.1]*self.lidar_samples , dtype=np.float32)
+        self.observation_space = spaces.Box(low=low_obs, high=high_obs, dtype=np.float32)
         self.reset()
 
     def step(self, action):
@@ -47,7 +51,8 @@ class LunarTerrainEnv(gym.Env):
 
         reward, done = self._calculate_reward()
         sensors = self._get_lidar_readings()
-        obs = np.array([self.x, self.y, self.vx, self.vy] + sensors, dtype=np.float32)
+        obs = np.array([self.x, self.y, self.vx, self.vy], dtype=np.float32)
+        obs = np.concatenate((obs, sensors), axis=0)
         return obs, reward, done, False, {}
 
     def reset(self, seed=None, options=None):
@@ -79,7 +84,8 @@ class LunarTerrainEnv(gym.Env):
         self.prev_goal_dt = self.goal_dt[agent_pixel_y, agent_pixel_x]
 
         sensors = self._get_lidar_readings()
-        obs = np.array([self.x, self.y, self.vx, self.vy] + sensors, dtype=np.float32)
+        obs = np.array([self.x, self.y, self.vx, self.vy], dtype=np.float32)
+        obs = np.concatenate((obs, sensors), axis=0)
         return obs, {}
 
     def _calculate_reward(self):
@@ -120,17 +126,84 @@ class LunarTerrainEnv(gym.Env):
         return dt_grid[agent_pixel_y, agent_pixel_x]
 
     def _get_lidar_readings(self):
-        angles = np.linspace(-np.pi/2, np.pi/2, 5)
-        distances = []
-        for angle_offset in angles:
-            check_x = self.x + np.cos(self.angle + angle_offset)
-            check_y = self.y + np.sin(self.angle + angle_offset)
-            min_dist = 1.0
-            for obs in self.obstacles:
-                dist = np.linalg.norm(np.array([check_x, check_y]) - obs)
-                min_dist = min(min_dist, dist)
-            distances.append(min_dist)
-        return distances
+        max_range = 5.0  # maximum sensing distance (can be adjusted)
+        # Precompute the beam angles (0 to 2π) for each of the lidar_samples beams.
+        beam_angles = np.linspace(0, 2*np.pi, self.lidar_samples, endpoint=False)
+        
+        # Initialize an array to hold the closest obstacle distance for each beam.
+        # We start with max_range for all beams.
+        obstacle_distances = np.full(self.lidar_samples, max_range)
+        
+        # Get the robot's current position.
+        robot_pos = np.array([self.x, self.y])
+        
+        # Loop over obstacles to update the distances where a beam hits an obstacle.
+        for obs in self.obstacles:
+            # Center of the obstacle.
+            obs_center = obs
+            # Vector from the robot to the obstacle.
+            delta = obs_center - robot_pos
+            d = np.linalg.norm(delta)
+            if d == 0:
+                continue  # avoid division by zero
+            
+            # Angle from the robot to the obstacle center.
+            center_angle = np.arctan2(delta[1], delta[0])
+            
+            # Compute the half angular width of the obstacle as seen from the robot.
+            # (If d < 0.3 then the robot is inside the obstacle; here we simply treat it as occluding all beams.)
+            if d < 0.3:
+                angle_offset = np.pi
+            else:
+                angle_offset = np.arcsin(min(0.3/d, 1.0))
+            
+            # Compute the angular difference between each beam and the obstacle center.
+            # The np.angle trick gives differences in the range [-π, π].
+            delta_angles = np.angle(np.exp(1j*(beam_angles - center_angle)))
+            
+            # Find the beams that are within the obstacle’s angular extent.
+            mask = np.abs(delta_angles) <= angle_offset
+            
+            # For the beams in the mask, compute the intersection distance.
+            # The projection of delta onto the beam direction gives t = d*cos(delta_angle).
+            t_all = d * np.cos(delta_angles[mask])
+            # The perpendicular distance is d*sin(delta_angle) (take absolute value).
+            perp_all = np.abs(d * np.sin(delta_angles[mask]))
+            
+            # Only consider beams for which the obstacle is in front of the robot.
+            valid = t_all > 0
+            if not np.any(valid):
+                continue
+            
+            t = t_all[valid]
+            perp = perp_all[valid]
+            # Compute the distance along the beam to the circle’s edge.
+            # Clip any numerical issues with the square root by ensuring a nonnegative argument.
+            sqrt_term = np.sqrt(np.maximum(0.0, 0.3**2 - perp**2))
+            intersect_dist = t - sqrt_term
+            
+            # Map these valid beams back to their indices in the full array.
+            beam_indices = np.nonzero(mask)[0][valid]
+            # Update the distance for these beams if the computed intersection is closer.
+            obstacle_distances[beam_indices] = np.minimum(obstacle_distances[beam_indices], intersect_dist)
+        
+        # Now compute the distances to the grid walls for each beam.
+        # The grid has walls at x = 0, x = 5, y = 0, and y = 5.
+        dx = np.cos(beam_angles)
+        dy = np.sin(beam_angles)
+        
+        # Distance to vertical walls.
+        dist_x = np.where(dx > 0, (5.0 - self.x) / dx,
+                        np.where(dx < 0, self.x / -dx, np.inf))
+        # Distance to horizontal walls.
+        dist_y = np.where(dy > 0, (5.0 - self.y) / dy,
+                        np.where(dy < 0, self.y / -dy, np.inf))
+        wall_distances = np.minimum(dist_x, dist_y)
+        
+        # The final lidar reading is the minimum of the obstacle distance and the wall distance.
+        readings = np.minimum(obstacle_distances, wall_distances)
+        
+        return readings
 
     def _collided_with_wall(self):
         return self.x < 0 or self.x > 5 or self.y < 0 or self.y > 5
@@ -143,7 +216,11 @@ class LunarTerrainEnv(gym.Env):
 # ====================================
 def train_model():
     env = make_vec_env(LunarTerrainEnv, n_envs=4)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu" 
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
     print(f"Using device: {device}")
 
     model_path = "lunar_rl_model"
@@ -155,7 +232,7 @@ def train_model():
         model = PPO("MlpPolicy", env, learning_rate=1e-4, device=device, verbose=1)
         print("Creating a new model from scratch.")
 
-    total_timesteps = 100000
+    total_timesteps = 50000
     with alive_bar(total_timesteps, title="Training Progress") as bar:
         for i in range(0, total_timesteps, 1000):
             model.learn(total_timesteps=1000)
