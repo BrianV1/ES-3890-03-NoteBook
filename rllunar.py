@@ -34,8 +34,8 @@ class LunarTerrainEnv(gym.Env):
 
         self.lidar_samples = 360
 
-        low_obs = np.array([0.0, 0.0, -1.0, -1.0] + [0.0]*self.lidar_samples , dtype=np.float32)
-        high_obs = np.array([5.0, 5.0, 1.0, 1.0] + [7.1]*self.lidar_samples , dtype=np.float32)
+        low_obs = np.array([0.0, 0.0, -1.0, -1.0, -1.0] + [0.0]*self.lidar_samples , dtype=np.float32)
+        high_obs = np.array([5.0, 5.0, 1.0, 1.0, 1.0] + [7.1]*self.lidar_samples , dtype=np.float32)
         self.observation_space = spaces.Box(low=low_obs, high=high_obs, dtype=np.float32)
         self.reset()
 
@@ -55,7 +55,7 @@ class LunarTerrainEnv(gym.Env):
 
         reward, done = self._calculate_reward()
         sensors = self._get_lidar_readings()
-        obs = np.array([self.x, self.y, self.vx, self.vy], dtype=np.float32)
+        obs = np.array([self.x, self.y, self.vx, self.vy, self.angle / np.pi], dtype=np.float32)
         obs = np.concatenate((obs, sensors), axis=0)
         return obs, reward, done, False, {}
 
@@ -88,7 +88,7 @@ class LunarTerrainEnv(gym.Env):
         self.prev_goal_dt = self.goal_dt[agent_pixel_y, agent_pixel_x]
 
         sensors = self._get_lidar_readings()
-        obs = np.array([self.x, self.y, self.vx, self.vy], dtype=np.float32)
+        obs = np.array([self.x, self.y, self.vx, self.vy, self.angle / np.pi], dtype=np.float32)
         obs = np.concatenate((obs, sensors), axis=0)
         return obs, {}
 
@@ -255,7 +255,7 @@ def train_model():
         model = PPO("MlpPolicy", env, learning_rate=1e-4, device=device, verbose=1)
         print("Creating a new model from scratch.")
 
-    total_timesteps = 200000
+    total_timesteps = 20000
     with alive_bar(total_timesteps, title="Training Progress") as bar:
         for i in range(0, total_timesteps, 1000):
             model.learn(total_timesteps=1000)
